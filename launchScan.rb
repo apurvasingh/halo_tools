@@ -4,13 +4,13 @@ require 'rubygems'
 require 'halo-api-lib'
 
 class CmdArgs
-  attr_accessor :base_url, :key_id, :key_secret, :cmd, :arg, :verbose, :url
+  attr_accessor :base_url, :key_id, :key_secret, :cmd, :arg, :verbose, :url, :nopoll
   attr_accessor :scantype, :group_name, :display_issues, :get_status, :starting
 
   def initialize()
     @base_url = "https://portal.cloudpassage.com/"
-    @key_id = "your_key"
-    @key_secret = "your_secret"
+    @key_id = "05266dad"
+    @key_secret = "03f7ce883627f654cc877f67c9d61393"
     @cmd = "listing"
     @arg = nil
     @url = nil
@@ -20,6 +20,7 @@ class CmdArgs
     @display_issues = false
     @get_status = false
     @starting = nil
+    @nopoll = false
   end
 
   def parse(args)
@@ -48,6 +49,8 @@ class CmdArgs
         @display_issues = true
       elsif (arg == "--scanstatus")
         @get_status = true
+      elsif (arg == "--nopoll")
+        @nopoll = true
       else
         puts "Unrecognized argument: #{arg}"
         ok = false
@@ -67,6 +70,7 @@ class CmdArgs
     puts "    --starting=<when>\t\tOnly get status for scans after when (ISO-8601 format)"
     puts "    --base=<url>\t\tOverride base URL (normally #{@base_url})"
     puts "    --issues\t\t\tDisplay issues found by scan"
+    puts "    --nopoll\t\t\tDon't poll for scan completion after launching scans"
     puts "    -v\t\t\t\tVerbose output"
   end
 
@@ -194,28 +198,30 @@ begin
       cmdList << cmd
     end
   end
-  0.upto(18) do |x|
-    sleep 5
-    allDone = true
-    cmdList.each do |cmd|
-      cmd.update_status(client)
-      puts "Scan status: #{cmd.status}"
-      if (cmd.status.downcase == "completed")
-        puts "Scan results: #{cmd.result}"
-        if (cmd_line.display_issues)
-          issues = server[0].issues client
-          puts issues.to_s
+  if (! cmd_line.nopoll)
+    0.upto(18) do |x|
+      sleep 5
+      allDone = true
+      cmdList.each do |cmd|
+        cmd.update_status(client)
+        puts "Scan status: #{cmd.status}"
+        if (cmd.status.downcase == "completed")
+          puts "Scan results: #{cmd.result}"
+          if (cmd_line.display_issues)
+            issues = server[0].issues client
+            puts issues.to_s
+          end
+        elsif (cmd.status.downcase == "failed")
+          puts "Scan failed"
+        else
+          allDone = false
         end
-      elsif (cmd.status.downcase == "failed")
-        puts "Scan failed"
-      else
-        allDone = false
       end
+      exit if allDone
     end
-    exit if allDone
   end
   puts "Scan still outstanding, use the following cmd to monitor:"
-  puts "scan_server --url=#{cmd.url}"
+  puts "launchScan.rb --url=#{cmd.url}"
 rescue Halo::ConnectionException => conn_err
   puts "Connection Error: " + conn_err.error_descr
   exit
