@@ -50,8 +50,8 @@ class CmdArgs
 
   def initialize()
     @base_url = "https://portal.cloudpassage.com/"
-    @key_id = "05266dad"
-    @key_secret = "03f7ce883627f654cc877f67c9d61393"
+    @key_id = "your_key_id"
+    @key_secret = "your_secret"
     @url = nil
     @group_name = nil
     @verbose = false
