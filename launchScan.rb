@@ -5,12 +5,13 @@ require 'halo-api-lib'
 
 class CmdArgs
   attr_accessor :base_url, :key_id, :key_secret, :cmd, :arg, :verbose, :url, :nopoll
-  attr_accessor :scantype, :group_name, :display_issues, :get_status, :starting
+  attr_accessor :scantype, :group_name, :display_issues, :get_status, :starting, :delay, :firstx
+  attr_accessor :listonly, :roundrobin, :instance_name_delimiter
 
   def initialize()
     @base_url = "https://portal.cloudpassage.com/"
-    @key_id = "your_key"
-    @key_secret = "your_secret"
+    @key_id = "05266dad"
+    @key_secret = "03f7ce883627f654cc877f67c9d61393"
     @cmd = "listing"
     @arg = nil
     @url = nil
@@ -21,6 +22,11 @@ class CmdArgs
     @get_status = false
     @starting = nil
     @nopoll = false
+    @delay = nil
+    @firstx = nil
+    @listonly = false
+    @roundrobin = false
+    @instance_name_delimiter = '_'
   end
 
   def parse(args)
@@ -51,6 +57,26 @@ class CmdArgs
         @get_status = true
       elsif (arg == "--nopoll")
         @nopoll = true
+      elsif (arg == "--listonly")
+        @listonly = true
+      elsif (arg == "--roundrobin") || (arg == "--loadbalance")
+        @roundrobin = true
+      elsif (arg.start_with?("--numofservers="))
+        argarg, tmp = arg.split("=")
+        @firstx = tmp.to_i
+        if @firstx == 0
+          puts "Illegal number of servers value: #{tmp}"
+          exit
+        end
+      elsif (arg.start_with?("--interval="))
+        argarg, tmp = arg.split("=")
+        @delay = tmp.to_i
+        if @delay == 0
+          puts "Illegal scan start delay value: #{tmp}"
+          exit
+        end
+      elsif (arg == "--localca")
+        ENV['SSL_CERT_FILE'] = File.expand_path(File.dirname(__FILE__)) + "/certs/cacert.pem"
       else
         puts "Unrecognized argument: #{arg}"
         ok = false
@@ -71,6 +97,10 @@ class CmdArgs
     puts "    --base=<url>\t\tOverride base URL (normally #{@base_url})"
     puts "    --issues\t\t\tDisplay issues found by scan"
     puts "    --nopoll\t\t\tDon't poll for scan completion after launching scans"
+    puts "    --interval=<secs>\t\tDelay between scan launches (in seconds)"
+    puts "    --numofservers=<n>\t\tMaximum number of servers to launch scans on"
+    puts "    --localca\t\t\tUse local SSL cert file (needed on Windows)"
+    puts "    --roundrobin\t\tBalance the load evenly across EC2 instances"
     puts "    -v\t\t\t\tVerbose output"
   end
 
@@ -116,7 +146,7 @@ def getServersFromGroup(group_name, client)
     group.name == group_name # hex numbers might be upper or lower case
   end
   if (groups.length > 0)
-    groups[0].servers client
+    groups[0].servers(client)
   else
     []
   end
@@ -138,6 +168,43 @@ def filterScanResults(status_list, serverList, scan_type)
   end
 end
 
+def extractInstanceFromServer(server,cmd_line)
+  if (server.hostname.include?(cmd_line.instance_name_delimiter))
+    server.hostname.split(cmd_line.instance_name_delimiter)[0]
+  else
+    ""
+  end
+end
+
+def sortByInstance(oldList,cmd_line)
+  newList = []
+  instanceMap = {}
+  instanceList = []
+  oldList.each do |server|
+    instanceName = extractInstanceFromServer(server,cmd_line)
+    if (instanceMap[instanceName] == nil)
+      instanceMap[instanceName] = []
+      instanceList << instanceName
+    end
+    instanceMap[instanceName] << server
+  end
+  maxInstanceCount = 0
+  instanceList.each do |instanceName|
+    if (instanceMap[instanceName] != nil) && (instanceMap[instanceName].length > maxInstanceCount)
+      maxInstanceCount = instanceMap[instanceName].length
+    end
+  end
+  1.upto(maxInstanceCount) do |index|
+    instanceList.each do |instanceName|
+      list = instanceMap[instanceName]
+      if (list != nil) && (list.length >= index)
+        newList << list[index - 1]
+      end
+    end
+  end
+  newList
+end
+
 cmd_line = CmdArgs.new()
 cmd_line.parse(ARGV)
 
@@ -157,9 +224,9 @@ begin
     # check on previously issued scan command
     cmd = Halo::ServerCommands.new({ :url => cmd_line.url })
   else
-    server_list = Halo::Servers.all client
-    puts "Found #{server_list.length} servers" if cmd_line.verbose
     if (cmd_line.group_name == nil)
+      server_list = Halo::Servers.all(client,'active')
+      puts "Found #{server_list.length} servers" if cmd_line.verbose
       if (cmd_line.get_status)
         status_list, next_link, count = Halo::ScanStatus.all(client,nil,nil,cmd_line.starting,nil)
         filterScanResults(status_list,nil,cmd_line.scantype)
@@ -174,10 +241,23 @@ begin
       end
       exit
     end
-    serverList = getServersFromGroup(cmd_line.group_name, client)
+    if (cmd_line.group_name != 'ALL')
+      serverList = getServersFromGroup(cmd_line.group_name, client)
+      if (serverList != nil)
+        puts "Found #{serverList.length} servers in group #{cmd_line.group_name}" if cmd_line.verbose
+      else
+        puts "No servers in group #{cmd_line.group_name}"
+      end
+    else
+      serverList = Halo::Servers.all(client,'active')
+      puts "Found #{serverList.length} servers" if cmd_line.verbose
+    end
     if (serverList.length < 1)
       puts "Group not found or group is empty"
       exit
+    end
+    if (cmd_line.roundrobin)
+      serverList = sortByInstance(serverList,cmd_line)
     end
     if (cmd_line.get_status)
       status_list, next_link, count = Halo::ScanStatus.all(client,nil,nil,cmd_line.starting,nil)
@@ -191,11 +271,28 @@ begin
       exit
     end
     cmdList = []
+    serverCount = 0
     serverList.each do |server|
-      puts "Starting #{cmd_line.scantype} scan on #{cmd_line.server_name}" if cmd_line.verbose
-      cmd = server.start_scan(client,cmd_line.scantype)
+      puts "Starting #{cmd_line.scantype} scan on #{server.hostname}" if cmd_line.verbose
+      next if cmd_line.listonly
+      begin
+        cmd = server.start_scan(client,cmd_line.scantype)
+        if (cmd_line.delay != nil)
+          sleep cmd_line.delay
+        end
+      rescue Halo::FailedException => api_err
+        if (api_err.http_status == 422)
+          puts "Failed to start #{cmd_line.scantype} scan on #{server.hostname}: #{api_err.error_msg}"
+        else
+          raise api_err # throw it to be caught in outer rescue clause
+        end
+      end
       puts "Initial scan status: #{cmd.status}"
       cmdList << cmd
+      serverCount += 1
+      if (cmd_line.firstx != nil) && (serverCount >= cmd_line.firstx)
+        break
+      end
     end
   end
   if (! cmd_line.nopoll)
